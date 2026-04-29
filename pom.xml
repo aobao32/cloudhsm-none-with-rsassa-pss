@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>cloudhsm-rsassa-pss</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>CloudHSM RSASSA-PSS Demo</name>
+    <description>
+        使用 AWS CloudHSM JCE Provider SDK 5 在 HSM 内生成 RSA-2048 非对称密钥，
+        并用应用层 SHA-256 + HSM 侧 RSASSA-PSS (salt=32) 对文件进行签名
+    </description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.source>1.8</maven.compiler.source>
+        <maven.compiler.target>1.8</maven.compiler.target>
+    </properties>
+
+    <dependencies>
+        <!-- CloudHSM JCE Provider SDK 5
+             需要先安装到本地 Maven 仓库，例如：
+             mvn install:install-file -Dfile=/opt/cloudhsm/java/cloudhsm-jce-5.17.1.jar \
+                 -DgroupId=com.amazonaws -DartifactId=cloudhsm-jce \
+                 -Dversion=5.17.1 -Dpackaging=jar
+        -->
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>cloudhsm-jce</artifactId>
+            <version>5.17.1</version>
+            <scope>compile</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+                <configuration>
+                    <source>1.8</source>
+                    <target>1.8</target>
+                </configuration>
+            </plugin>
+
+            <!-- 构建完成后删除默认的薄 jar 以及 shade 插件产生的 original-*.jar，
+                 只保留下面两个可执行的 shaded jar -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <phase>verify</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <delete file="${project.build.directory}/${project.build.finalName}.jar" quiet="true"/>
+                                <delete quiet="true">
+                                    <fileset dir="${project.build.directory}" includes="original-*.jar"/>
+                                </delete>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- 使用 maven-shade-plugin 构建两个带依赖的可执行 jar -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.5.1</version>
+                <executions>
+                    <!-- 执行1：构建 RSA 密钥生成器 -->
+                    <execution>
+                        <id>rsa-keygen-jar</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <shadedArtifactAttached>true</shadedArtifactAttached>
+                            <shadedClassifierName>rsa-keygen</shadedClassifierName>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>com.example.cloudhsm.RSAKeyGenAndExport</mainClass>
+                                </transformer>
+                            </transformers>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>META-INF/MANIFEST.MF</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                            <finalName>rsa-keygen-${project.version}</finalName>
+                        </configuration>
+                    </execution>
+
+                    <!-- 执行2：构建 RSASSA-PSS 签名器 -->
+                    <execution>
+                        <id>pss-sign-jar</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <shadedArtifactAttached>true</shadedArtifactAttached>
+                            <shadedClassifierName>pss-sign</shadedClassifierName>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <mainClass>com.example.cloudhsm.RSASSAPSSFileSigner</mainClass>
+                                </transformer>
+                            </transformers>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>META-INF/MANIFEST.MF</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                            <finalName>pss-sign-${project.version}</finalName>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
