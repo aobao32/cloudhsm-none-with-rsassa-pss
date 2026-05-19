@@ -29,9 +29,10 @@ import java.util.Base64;
  *
  * <p>注意：按 AWS 官方文档，CloudHSM Client SDK 5 的带 hashing 的签名算法
  * （如 {@code RSASSA-PSS} 搭配 {@code PSSParameterSpec} 中的 {@code SHA-256}）
- * 会先在客户端本地对数据做 SHA-256，再将 hash 送到 HSM 做 PSS 运算——
- * 因此完全等价于 {@code NONEwithRSA/PSS + 应用层手算 SHA-256}，
- * 满足"应用层做 SHA-256，CloudHSM 做 RSASSA-PSS"的要求。</p>
+ * 会先由 <b>CloudHSM JCE Provider 在客户端 JVM 内的软件</b>对数据做 SHA-256，
+ * 再将 hash 送到 HSM 做 PSS 运算（不是用户应用代码做，也不是 HSM 做）——
+ * 因此与 {@code NONEwithRSASSA-PSS} + 应用层手算 SHA-256 在协议语义上完全等价，
+ * 满足"应用层之外的本机软件做 SHA-256，CloudHSM 做 RSASSA-PSS"的要求。</p>
  *
  * <p>用法：
  * <pre>
@@ -128,10 +129,11 @@ public class RSASSAPSSFileSigner {
             sig.initSign(privateKey);
 
             // 说明：CloudHSM SDK 5 的 "RSASSA-PSS"（搭配上面 PSSParameterSpec 中
-            // 的 SHA-256）会在客户端本地先对 update() 进来的原始数据做 SHA-256，
-            // 再把 32 字节的 hash 送到 HSM 做 PSS 运算——与 NONEwithRSA/PSS
-            // + 应用层手算 SHA-256 完全等价。所以这里直接 feed 原始文件内容，
-            // 产出的签名与步骤1 我们自己算出来的 hash 一一对应。
+            // 的 SHA-256）会由 CloudHSM JCE Provider 在客户端 JVM 内的软件先对
+            // update() 进来的原始数据做 SHA-256，再把 32 字节的 hash 送到 HSM
+            // 做 PSS 运算——与 NONEwithRSASSA-PSS + 应用层手算 SHA-256
+            // 在协议语义上完全等价。所以这里直接 feed 原始文件内容，产出的签名
+            // 与步骤1 我们自己算出来的 hash 一一对应。
             try (InputStream is = new BufferedInputStream(new FileInputStream(INPUT_FILE))) {
                 byte[] buf = new byte[8192];
                 int n;

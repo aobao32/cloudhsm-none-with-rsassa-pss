@@ -4,7 +4,7 @@
 
 ## 一、背景
 
-在做 IoT 固件签名、文档签名等场景时，Java 侧常见的写法是 `NONEwithRSASSA-PSS` 或 `NONEwithRSA/PSS`，也就是"应用层先做 SHA-256，再把 32 字节 hash 送到 HSM 做 PSS"。
+在做 IoT 固件签名、文档签名等场景时，Java 侧常见的写法是 `NONEwithRSASSA-PSS`（这是 JDK SunRsaSign provider 注册的标准算法名），语义上就是"应用层先做 SHA-256，再把 32 字节 hash 送到 HSM 做 PSS"。
 
 但在 CloudHSM JCE Provider SDK 5 上构建如下代码：
 
@@ -24,7 +24,7 @@ java.security.NoSuchAlgorithmException: no such algorithm: NONEwithRSASSA-PSS fo
 
 这其实**只是算法名的差异，而不是计算逻辑的差异**。
 
-CloudHSM SDK 5 提供的 `RSASSA-PSS` 算法，执行流程就是：客户端 SDK 在本地做 SHA-256 → 把 32 字节 hash 送到 HSM → HSM 用私钥做 PSS 填充和模幂运算。这与 `NONEwithRSASSA-PSS`（应用层做 SHA-256 + HSM 做 raw PSS）在字节层面完全等价，产出的签名可以互相验证。
+CloudHSM SDK 5 提供的 `RSASSA-PSS` 算法，执行流程就是：**CloudHSM JCE Provider 在客户端 JVM 内的软件做 SHA-256**（不是用户应用代码做，也不是 HSM 做）→ 把 32 字节 hash 送到 HSM → HSM 用私钥做 PSS 填充和模幂运算。这与 `NONEwithRSASSA-PSS`（应用层做 SHA-256 + HSM 做 raw PSS）在协议语义上完全等价——两种写法产出的签名都是合法的 RSASSA-PSS，可以用同一把公钥互相验证（注意 PSS 内部每次都用一个新的随机 salt，所以两次签名的字节本身不会相同，但都能通过验签）。
 
 因此本项目的做法就是**直接调用 `RSASSA-PSS`**，并通过 `PSSParameterSpec` 指定 `SHA-256` / `MGF1-SHA256` / `saltLength=32` / `trailerField=1`：
 
