@@ -198,7 +198,7 @@ trailerField: 1
 
 CloudHSM 输出的签名是标准 RSASSA-PSS，可以被任何支持 PKCS#1 v2.2 的工具验证，这里用 `openssl` 做外部验签，**完全不依赖 HSM**。
 
-### 5.1 使用 openssl 验签
+### 5.1 使用 openssl 验签（OpenSSL负责SHA256）
 
 ```bash
 openssl dgst -sha256 \
@@ -234,6 +234,86 @@ Verified OK
 - **摘要算法或 MGF1 摘要不一致**：比如签名端用了 SHA-256 而验签端只写了 `-sha1`。
 - **`message.txt` 被意外修改**：注意 `write-message.sh` 故意用 `printf` 写入，不带尾部换行；如果事后用编辑器打开再保存、或用 `echo >>` 追加，都会改动内容导致 hash 不一致。
 - **使用了错误的公钥**：比如重跑了 `rsa-keygen` 又生成了一对新密钥，但没重新签名。
+
+### 5.4 备用验签：使用 `openssl pkeyutl`
+
+前文章节 5.1 用的是 `openssl dgst`，它会自己对原文做 SHA-256 再走 PSS 验签。如果想要一种"openssl 不再做 hash、只对已有 32 字节摘要做 PSS 验签"的方式（即 `NONEwithRSASSA-PSS` 的语义），可以改用 `openssl pkeyutl`。这种方式不依赖 HSM，也不依赖 `dgst` 命令，更接近 PSS 的底层数学。
+
+#### 5.4.1 文件格式准备
+
+`pkeyutl -verify` 需要的输入和 `dgst -verify` 不一样：
+
+| 文件 | `dgst` 用什么 | `pkeyutl` 用什么 | 说明 |
+|---|---|---|---|
+| 待验签数据 | `message.txt`（原文） | `digest.bin`（32 字节 SHA-256 摘要） | `pkeyutl` 不会自己算 hash |
+| 签名 | `message.sig` | `signature.bin` | 内容相同，只是约定的扩展名 |
+| 公钥 | `pss_rsa_pub.pem` | `pubkey.pem` | 内容相同，X.509 PEM |
+
+所以使用 `pkeyutl` 前要先把项目里产生的文件转换/改名。下面三步是 `dgst` → `pkeyutl` 的"格式适配"操作，**没有重新签名、也没有改密钥**：
+
+```bash
+# ① 把 message.txt 算成 32 字节二进制 SHA-256 摘要（关键转换：原文 → 摘要）
+#    -binary 让 openssl 输出原始 32 字节，而不是 hex 文本；不要写成 > digest.bin
+#    时漏掉 -binary，否则文件里是 64 个 hex 字符 + 换行，长度就不是 32 了。
+openssl dgst -sha256 -binary message.txt > digest.bin
+
+# ② 签名文件改名（也可以用软链接，内容一字节都不变）
+cp message.sig signature.bin
+
+# ③ 公钥文件改名（同样只是改名）
+cp pss_rsa_pub.pem pubkey.pem
+```
+
+可选的快速核对：
+
+```bash
+# digest.bin 必须正好 32 字节，对应 SHA-256 的 256 bit
+wc -c digest.bin       # 期望输出: 32 digest.bin
+
+# 把 digest.bin 里的内容打印出来对比 sha256sum 的结果
+xxd -p -c 64 digest.bin
+sha256sum message.txt
+# 这两行的 hex 必须完全相同
+```
+
+#### 5.4.2 执行验签命令
+
+```bash
+openssl pkeyutl \
+  -verify \
+  -pubin \
+  -inkey pubkey.pem \
+  -in digest.bin \
+  -sigfile signature.bin \
+  -pkeyopt rsa_padding_mode:pss \
+  -pkeyopt rsa_pss_saltlen:-1 \
+  -pkeyopt rsa_mgf1_md:sha256 \
+  -pkeyopt digest:sha256
+```
+
+预期输出：
+
+```
+Signature Verified Successfully
+```
+
+注意成功输出的字符串和 `dgst -verify` 的 `Verified OK` 不一样，写自动化脚本判断成功失败时不要复用同一条 grep。
+
+#### 5.4.3 参数说明
+
+- `-verify`：表示这次是验签操作，需要配合 `-pubin -inkey` 提供公钥。
+- `-pubin`：告诉 `pkeyutl` `-inkey` 指定的是公钥文件而不是私钥文件。
+- `-inkey pubkey.pem`：步骤 4.3 从 CloudHSM 导出的 X.509 公钥 PEM。
+- `-in digest.bin`：**已经预先算好的 32 字节 SHA-256 摘要**，不是原文。这是 `pkeyutl` 和 `dgst` 最大的不同。
+- `-sigfile signature.bin`：步骤 4.4 生成的签名（即原来的 `message.sig`）。
+- `-pkeyopt rsa_padding_mode:pss`：使用 RSASSA-PSS 而不是 PKCS#1 v1.5。
+- `-pkeyopt rsa_pss_saltlen:-1`：salt 长度。`-1` 是 openssl 的特殊值，表示"等于摘要长度"，SHA-256 时即 32，与签名端的 `saltLength=32` 完全一致。也可以直接写 `32`，效果相同。
+- `-pkeyopt rsa_mgf1_md:sha256`：MGF1 内部使用的摘要算法。如果不显式写，openssl 会回退用 `digest` 选项的值，恰好也是 SHA-256，但建议显式写出来避免歧义。
+- `-pkeyopt digest:sha256`：告诉 `pkeyutl` 这次 PSS 编码里使用的 hash 是 SHA-256。注意它**不会**让 `pkeyutl` 自己再去做 hash——它只是告诉 PSS 内部"我送进去的 32 字节是 SHA-256 出来的"。
+
+#### 5.4.4 这条命令在意义上等价于哪条 Java 写法
+
+`pkeyutl` 这条命令对应"应用层先做 hash、再调底层 PSS"这种语义，和 JCA 里 `NONEwithRSASSA-PSS` 的语义完全相同——也正是 README 第二节讨论的那种写法。它和 5.1 的 `dgst` 命令验证的**是同一个签名**，只是把"算 SHA-256"这一步从 openssl 内部挪到了用户手里（步骤 5.4.1 的 ①）。两条命令的验签结果应当**始终一致**：要么都通过，要么都失败。
 
 ## 六、参考文档
 
